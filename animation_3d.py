@@ -11,27 +11,100 @@ import time
 class Object3D:
     """3D object with vertices, rotation, and position"""
     
-    def __init__(self, vertices, edges, name="Object"):
+    def __init__(self, vertices, edges, faces=None, name="Object"):
         self.vertices = np.array(vertices, dtype=float)
         self.edges = edges
+        self.faces = faces if faces is not None else []
         self.name = name
         self.rotation = np.array([0.0, 0.0, 0.0])  # x, y, z rotation
         self.position = np.array([0.0, 0.0, 0.0])
         self.scale = 100.0
+    
+    def get_face_center(self, face_idx):
+        """Get center point of a face in local 3D space"""
+        if face_idx >= len(self.faces):
+            return np.array([0.0, 0.0, 0.0])
+        
+        face_vertices = [self.vertices[i] for i in self.faces[face_idx]]
+        return np.mean(face_vertices, axis=0)
+    
+    def get_face_normal(self, face_idx):
+        """Get normal vector of a face"""
+        if face_idx >= len(self.faces) or len(self.faces[face_idx]) < 3:
+            return np.array([0.0, 0.0, 1.0])
+        
+        # Get three vertices of the face
+        v0 = self.vertices[self.faces[face_idx][0]]
+        v1 = self.vertices[self.faces[face_idx][1]]
+        v2 = self.vertices[self.faces[face_idx][2]]
+        
+        # Calculate normal using cross product
+        edge1 = v1 - v0
+        edge2 = v2 - v0
+        normal = np.cross(edge1, edge2)
+        
+        # Normalize
+        length = np.linalg.norm(normal)
+        if length > 0:
+            normal = normal / length
+        
+        return normal
+    
+    def extrude_face(self, face_idx, distance):
+        """Extrude a face to create new geometry"""
+        if face_idx >= len(self.faces):
+            return
+        
+        face = self.faces[face_idx]
+        normal = self.get_face_normal(face_idx)
+        
+        # Create new vertices by offsetting the face vertices
+        new_vertex_indices = []
+        num_original_vertices = len(self.vertices)
+        
+        for vi in face:
+            new_vertex = self.vertices[vi] + normal * distance
+            self.vertices = np.vstack([self.vertices, new_vertex])
+            new_vertex_indices.append(num_original_vertices + len(new_vertex_indices))
+        
+        # Create connecting edges between old and new vertices
+        for i in range(len(face)):
+            old_v = face[i]
+            new_v = new_vertex_indices[i]
+            # Vertical edge
+            self.edges.append((old_v, new_v))
+            
+            # Horizontal edge on new face
+            next_i = (i + 1) % len(face)
+            self.edges.append((new_v, new_vertex_indices[next_i]))
+        
+        # Add new face at the extruded position
+        self.faces.append(new_vertex_indices)
+        
+        return new_vertex_indices
         
     @staticmethod
     def create_cube():
         """Create a cube"""
         vertices = [
-            [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
-            [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]
+            [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],  # Front: 0,1,2,3
+            [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]        # Back: 4,5,6,7
         ]
         edges = [
             (0, 1), (1, 2), (2, 3), (3, 0),
             (4, 5), (5, 6), (6, 7), (7, 4),
             (0, 4), (1, 5), (2, 6), (3, 7)
         ]
-        return Object3D(vertices, edges, "Cube")
+        # Define 6 faces (each face is a list of 4 vertex indices in counter-clockwise order)
+        faces = [
+            [0, 1, 2, 3],  # Front (z = -1)
+            [4, 7, 6, 5],  # Back (z = 1)
+            [0, 4, 5, 1],  # Bottom (y = -1)
+            [3, 2, 6, 7],  # Top (y = 1)
+            [0, 3, 7, 4],  # Left (x = -1)
+            [1, 5, 6, 2],  # Right (x = 1)
+        ]
+        return Object3D(vertices, edges, faces, "Cube")
     
     @staticmethod
     def create_pyramid():
@@ -110,12 +183,22 @@ class Animation3D:
         
         # Physics state for Inertial Rotation
         self.angular_velocity = np.array([0.0, 0.0, 0.0])
-        self.friction = 0.95  # Slow down factor (0.0 to 1.0)
+        self.friction = 0.92  # Slow down factor (lower = more friction)
         
         # Grab State for Direct Manipulation
         self.is_grabbed = False
         self.grab_start_hand_rotation = np.array([0.0, 0.0, 0.0])
         self.grab_start_object_rotation = np.array([0.0, 0.0, 0.0])
+        
+        # Momentum tracking for smooth release
+        self.last_rotation = self.current_rotation.copy()
+        self.rotation_history = []  # Track recent rotation changes
+        
+        # Face selection and extrusion
+        self.selected_face_idx = None
+        self.is_extruding = False
+        self.extrusion_start_pos = None
+        self.extrusion_distance = 0.0
         
         # Smoothing
         self.smooth_factor = 0.2  # Slightly faster response
@@ -124,6 +207,40 @@ class Animation3D:
         self.primary_color = (220, 150, 255)  # Brighter Purple
         self.secondary_color = (255, 220, 120)  # Bright Cyan/Yellow
         self.accent_color = (120, 255, 120)  # Bright Green
+    
+    def select_face_by_position(self, hand_x, hand_y, projected_vertices):
+        """Select closest face to hand position"""
+        obj = self.objects[self.current_object_idx]
+        
+        if not obj.faces:
+            return None
+        
+        min_dist = float('inf')
+        closest_face = None
+        
+        for i, face in enumerate(obj.faces):
+            # Skip if any vertex index is out of bounds
+            if any(vi >= len(projected_vertices) for vi in face):
+                continue
+                
+            try:
+                # Calculate face center in 2D screen space
+                face_center_2d = np.mean([projected_vertices[vi][:2] for vi in face], axis=0)
+                
+                # Distance to hand
+                dist = np.linalg.norm(face_center_2d - np.array([hand_x, hand_y]))
+                
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_face = i
+            except (IndexError, TypeError):
+                # Skip invalid faces
+                continue
+        
+        # Only select if reasonably close (within 150 pixels)
+        if closest_face is not None and min_dist < 150:
+            return closest_face
+        return None
         
     def get_rotation_matrix(self, angles):
         """Calculate 3D rotation matrix"""
@@ -208,8 +325,13 @@ class Animation3D:
         
         if self.mode == 'INERTIA':
             # Physics mode: Apply velocity and friction
-            self.current_rotation += self.angular_velocity * delta_time
-            self.angular_velocity *= self.friction # Decay
+            self.current_rotation += self.angular_velocity
+            self.angular_velocity *= self.friction
+            
+            # Stop if velocity is very small
+            if np.linalg.norm(self.angular_velocity) < 0.001:
+                self.angular_velocity = np.array([0.0, 0.0, 0.0])
+            
             self.target_rotation = self.current_rotation.copy()
             
         elif self.mode == 'FREE_ROTATION':
@@ -288,6 +410,62 @@ class Animation3D:
             cv2.circle(frame, pos, 8, base_color, -1, cv2.LINE_AA)
             # Inner bright dot
             cv2.circle(frame, pos, 5, (255, 255, 255), -1, cv2.LINE_AA)
+        
+        # Highlight selected face if in extrusion mode
+        if self.selected_face_idx is not None and obj.faces:
+            face = obj.faces[self.selected_face_idx]
+            
+            # Draw face outline in bright color
+            face_points = [tuple(projected[vi][:2].astype(int)) for vi in face]
+            
+            # Fill face with semi-transparent highlight
+            overlay = frame.copy()
+            pts = np.array(face_points, np.int32).reshape((-1, 1, 2))
+            cv2.fillPoly(overlay, [pts], (0, 255, 255))  # Cyan highlight
+            cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+            
+            # Draw bright outline
+            for i in range(len(face_points)):
+                p1 = face_points[i]
+                p2 = face_points[(i + 1) % len(face_points)]
+                cv2.line(frame, p1, p2, (0, 255, 255), 4, cv2.LINE_AA)
+            
+            # Show extrusion preview if actively extruding
+            if self.is_extruding and self.extrusion_distance > 10:
+                # Get face normal
+                normal = obj.get_face_normal(self.selected_face_idx)
+                
+                # Apply rotation to normal
+                rotation_matrix = self.get_rotation_matrix(self.current_rotation)
+                rotated_normal = rotation_matrix @ normal
+                
+                # Calculate extrusion offset (simplified: use distance / 2 as depth)
+                extrude_amount = self.extrusion_distance / 200.0  # Scale factor
+                offset_3d = rotated_normal * extrude_amount
+                
+                # Project extruded face points
+                extruded_vertices = []
+                for vi in face:
+                    new_vertex = obj.vertices[vi] + offset_3d
+                    extruded_vertices.append(new_vertex)
+                
+                # Project to 2D
+                extruded_projected = []
+                for vertex in extruded_vertices:
+                    rotated = rotation_matrix @ vertex
+                    x = rotated[0] * obj.scale + self.center[0] + center_offset[0]
+                    y = rotated[1] * obj.scale + self.center[1] + center_offset[1]
+                    extruded_projected.append((int(x), int(y)))
+                
+                # Draw extruded face preview (semi-transparent)
+                overlay = frame.copy()
+                pts = np.array(extruded_projected, np.int32).reshape((-1, 1, 2))
+                cv2.fillPoly(overlay, [pts], (255, 100, 0))  # Orange preview
+                cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
+                
+                # Draw connecting lines
+                for i in range(len(face_points)):
+                    cv2.line(frame, face_points[i], extruded_projected[i], (255, 200, 0), 2, cv2.LINE_AA)
     
     def switch_object(self):
         """Switch to next 3D object"""

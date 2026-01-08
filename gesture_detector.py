@@ -2,6 +2,9 @@
 Hand gesture detection and classification - Improved Version
 """
 import math
+import pickle
+import os
+import numpy as np
 
 
 class GestureDetector:
@@ -16,6 +19,19 @@ class GestureDetector:
         self.previous_gesture = None
         self.gesture_history = []
         self.max_history = 3  # Reduced for faster response
+        
+        # Load AI Model
+        self.model = None
+        model_path = 'gesture_model.pkl'
+        if os.path.exists(model_path):
+            try:
+                with open(model_path, 'rb') as f:
+                    self.model = pickle.load(f)
+                print("🧠 AI Model loaded successfully")
+            except Exception as e:
+                print(f"⚠️ Failed to load AI model: {e}")
+        else:
+            print("⚠️ No AI model found (gesture_model.pkl). AI translation disabled.")
         
     def get_distance(self, point1, point2):
         """Calculate distance between two landmark points"""
@@ -165,6 +181,43 @@ class GestureDetector:
             'changed': gesture_changed,
             'stable': len(set(self.gesture_history)) == 1 if self.gesture_history else False
         }
+
+    def predict_gesture(self, landmarks):
+        """
+        Predict gesture sign using trained AI model
+        
+        Args:
+           landmarks: List of hand landmarks
+           
+        Returns:
+            str: Predicted label or None
+        """
+        if self.model is None or not landmarks:
+            return None
+            
+        # Preprocess features (same as DataCollector)
+        wrist = landmarks[0]
+        base_x, base_y, base_z = wrist.x, wrist.y, wrist.z
+        
+        # Flatten and normalize
+        # Note: Must match training data format (flattened x, then y, then z)
+        # However, data_collector used: xs + ys + zs
+        xs = [(lm.x - base_x) for lm in landmarks]
+        ys = [(lm.y - base_y) for lm in landmarks]
+        zs = [(lm.z - base_z) for lm in landmarks]
+        
+        features = np.array([xs + ys + zs])
+        
+        try:
+            prediction = self.model.predict(features)[0]
+            confidence = np.max(self.model.predict_proba(features))
+            
+            if confidence > 0.6: # Confidence threshold
+                return prediction
+            else:
+                return "?"
+        except Exception:
+            return None
     
     def get_fingertip_positions(self, landmarks, width, height):
         """

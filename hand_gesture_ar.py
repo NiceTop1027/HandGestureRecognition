@@ -1,21 +1,26 @@
 """
 Hand Gesture Recognition - Premium UI
-Minimalist, high-performance hand tracking application
+Minimalist, high-performance hand tracking application with Holographic AR
 
 Controls:
 - ESC or Q: Quit application
 - H: Toggle info panel
 - L: Toggle hand landmarks
 - G: Toggle gesture guide
+- SPACE: Switch 3D Object
+- TAB: Switch Camera
 """
 import cv2
 import mediapipe as mp
 import numpy as np
 import time
+import pygame 
 from gesture_detector import GestureDetector
 from animation_3d import Animation3D
 from particle_system import ParticleSystem
-
+from text_renderer import TextRenderer
+from ai_translator import GeminiTranslator
+from renderer_opengl import RendererGL # New OpenGL Renderer
 
 class PremiumUI:
     """Premium UI design with glassmorphism and smooth animations"""
@@ -30,13 +35,10 @@ class PremiumUI:
     
     def __init__(self):
         self.animation_time = 0
+        self.text_renderer = TextRenderer()
         
     def draw_glassmorphism_panel(self, frame, x, y, w, h, alpha=0.2):
-        """
-        Draw glassmorphism panel with ROI optimization
-        (Faster than full frame blending)
-        """
-        # Ensure ROI is within frame bounds
+        """Draw glassmorphism panel with ROI optimization"""
         h_frame, w_frame = frame.shape[:2]
         x = max(0, x); y = max(0, y)
         w = min(w, w_frame - x); h = min(h, h_frame - y)
@@ -61,84 +63,65 @@ class PremiumUI:
     
     def draw_gradient_text(self, frame, text, x, y, font_scale=1.0, thickness=2):
         """Draw text with gradient effect"""
-        # Shadow first
         cv2.putText(frame, text, (x+2, y+2), cv2.FONT_HERSHEY_SIMPLEX,
                    font_scale, (0, 0, 0), thickness+1, cv2.LINE_AA)
         
-        # Main text
         cv2.putText(frame, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
                    font_scale, self.TEXT_PRIMARY, thickness, cv2.LINE_AA)
+
+    def draw_korean_text(self, frame, text, x, y, color=(255, 255, 255)):
+        """Draw Korean text using TextRenderer"""
+        frame[:] = self.text_renderer.put_text(frame, text, x, y, color)
     
     def draw_smooth_circle(self, frame, center, radius, color, thickness=-1):
         """Draw anti-aliased circle"""
         cv2.circle(frame, center, radius, color, thickness, cv2.LINE_AA)
     
     def draw_hand_hud(self, frame, center, text, color):
-        """Draw futuristic HUD around hand (Optimized)"""
+        """Draw futuristic HUD around hand"""
         x, y = center
         
         # Rotating rings animation
-        self.animation_time += 0.2 # Faster animation
+        self.animation_time += 0.2
         radius = 50 + int(np.sin(self.animation_time) * 5)
         
-        # Outer ring (Simple circle is fast)
+        # Outer ring
         cv2.circle(frame, (x, y), radius, color, 1, cv2.LINE_AA)
         
-        # Inner segmented ring - Optimize loop
-        # Reduce segments from 8 to 4 or 6 for speed, but keep look
-        # Pre-calculate sin/cos if possible, or reduce calls
+        # Inner segmented ring
         offset = self.animation_time * 20
-        for i in range(0, 360, 60): # 45 -> 60 (Fewer dots)
+        for i in range(0, 360, 60):
             angle = np.radians(i + offset)
-            # Fast int conversion
             end_x = int(x + np.cos(angle) * (radius - 10))
             end_y = int(y + np.sin(angle) * (radius - 10))
-            cv2.circle(frame, (end_x, end_y), 3, color, -1) # Slightly larger dots, fewer count
+            cv2.circle(frame, (end_x, end_y), 3, color, -1)
             
         # Label
         cv2.putText(frame, text, (x - 30, y - radius - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
         
-        # Connection line to center (Energy beam)
+        # Connection line to center
         h, w = frame.shape[:2]
         cx, cy = w // 2, h // 2
-        
-        # Draw line only if interacting
         cv2.line(frame, (x, y), (cx, cy), color, 1, cv2.LINE_AA)
         
-        # Draw single data point optimization
-        # Avoid complex mix math if possible
+        # Data point
         mix = (self.animation_time % 5) / 5.0
-        dot_x = int(x + (cx - x) * mix) # Optimized lerp
+        dot_x = int(x + (cx - x) * mix)
         dot_y = int(y + (cy - y) * mix)
         cv2.circle(frame, (dot_x, dot_y), 4, (255, 255, 255), -1)
-    
-    def draw_progress_arc(self, frame, center, radius, progress, color):
-        """Draw circular progress indicator"""
-        # Background arc
-        cv2.ellipse(frame, center, (radius, radius), 0, 0, 360,
-                   (60, 60, 70), 3, cv2.LINE_AA)
-        
-        # Progress arc
-        angle = int(360 * progress)
-        cv2.ellipse(frame, center, (radius, radius), -90, 0, angle,
-                   color, 4, cv2.LINE_AA)
-
 
 class HandGestureApp:
-    """Main application with premium UI"""
-    
-    TARGET_FPS = 60
+    """Main application with premium UI and OpenGL AR"""
     
     def __init__(self):
         # Initialize MediaPipe Hands
         self.mp_hands = mp.solutions.hands
         self.mp_drawing = mp.solutions.drawing_utils
-        self.mp_drawing_styles = mp.solutions.drawing_styles
         
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
-            max_num_hands=2,  # Enable Dual Hands
+            max_num_hands=2,
             model_complexity=1,
             min_detection_confidence=0.3,
             min_tracking_confidence=0.3
@@ -147,124 +130,150 @@ class HandGestureApp:
         # Components
         self.gesture_detector = GestureDetector()
         self.ui = PremiumUI()
-        self.animation_3d = None  # Will be initialized after camera
-        self.particle_system = ParticleSystem(max_particles=300)
+        
+        # Will be initialized in run()
+        self.animation_3d = None 
+        self.renderer = None
+        
+        # AI Translation State
+        try:
+            from keys import GEMINI_API_KEY
+            self.translator = GeminiTranslator(GEMINI_API_KEY)
+        except ImportError:
+            print("⚠️ keys.py not found or GEMINI_API_KEY missing. AI Translation disabled.")
+            self.translator = GeminiTranslator(None)
+            
+        self.gesture_buffer = []
+        self.last_buffer_update = time.time()
+        self.current_translation = ""
+        self.is_translating = False
         
         # UI state
         self.show_info = True
         self.show_landmarks = True
         self.show_guide = False
-        self.show_3d = True  # Show 3D animation
+        self.show_3d = True
         
         # Performance tracking
         self.fps = 0
         self.frame_times = []
         self.last_time = time.time()
-        self.prev_time = time.time()
         
         # Gesture control state
-        self.last_gesture_type = None
         self.prev_palm_center = None
         self.hand_velocity = np.array([0.0, 0.0])
         
-        # Camera
         self.cap = None
         
     def initialize_camera(self, camera_index=0):
-        """Initialize camera with optimal settings"""
+        """Initialize camera and renderer"""
+        if self.cap is not None:
+            self.cap.release()
+            
         self.cap = cv2.VideoCapture(camera_index)
         
-        # HD resolution for quality
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        self.cap.set(cv2.CAP_PROP_FPS, 60)  # Request 60 FPS
+        self.cap.set(cv2.CAP_PROP_FPS, 60)
         
         if not self.cap.isOpened():
-            raise RuntimeError("Cannot access camera")
+            print(f"⚠️ Camera index {camera_index} not available, trying 0")
+            if camera_index != 0:
+                return self.initialize_camera(0)
+            return False
+            
+        self.current_camera_index = camera_index
         
-        # Get frame dimensions for 3D animation
+        # Get dimensions
         ret, frame = self.cap.read()
         if ret:
             height, width = frame.shape[:2]
-            self.animation_3d = Animation3D(width, height)
+            # Initialize Physics/Logic Engine if not already done
+            if self.animation_3d is None:
+                self.animation_3d = Animation3D(width, height)
+            # Initialize OpenGL Renderer if not already done
+            if self.renderer is None:
+                self.renderer = RendererGL(width, height)
         
-        print("✅ Camera initialized at 1280x720@60fps")
-        print("✨ 3D Animation system loaded")
+        print(f"✅ Camera {camera_index} initialized")
         return True
     
+    def switch_camera(self):
+        """Switch to the next available camera"""
+        next_index = self.current_camera_index + 1
+        # Try up to index 4, then wrap back to 0
+        if next_index > 4: 
+            next_index = 0
+            
+        print(f"🔄 Switching to camera {next_index}...")
+        
+        # Attempt to initialize next camera
+        # We temporarily create a new capture to check if valid
+        temp_cap = cv2.VideoCapture(next_index)
+        if temp_cap.isOpened():
+            temp_cap.release()
+            self.initialize_camera(next_index)
+        else:
+            print(f"⚠️ Camera {next_index} not found. Wrapping to 0.")
+            self.initialize_camera(0)
+
     def update_fps(self):
         """Calculate smooth FPS"""
         current_time = time.time()
         delta = current_time - self.last_time
         self.last_time = current_time
-        
         if delta > 0:
             self.frame_times.append(1.0 / delta)
-            
-        # Keep last 30 frames
         if len(self.frame_times) > 30:
             self.frame_times.pop(0)
-        
-        # Calculate average
         self.fps = int(sum(self.frame_times) / len(self.frame_times))
     
     def draw_info_panel(self, frame, gesture):
         """Draw elegant info panel"""
+        if not self.show_info: return
+        
         height, width = frame.shape[:2]
         
-        if self.show_info:
-            # Top-left panel
-            panel_w, panel_h = 280, 160
-            self.ui.draw_glassmorphism_panel(frame, 20, 20, panel_w, panel_h, 0.25)
-            
-            # FPS indicator
-            fps_color = self.ui.SUCCESS_COLOR if self.fps >= 50 else self.ui.ACCENT_SECONDARY
-            self.ui.draw_gradient_text(frame, f"FPS: {self.fps}", 40, 55, 0.8, 2)
-            
-            # FPS progress bar
-            fps_progress = min(1.0, self.fps / 60.0)
-            bar_x, bar_y = 40, 70
-            bar_w, bar_h = 240, 6
-            
-            # Background bar
-            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h),
-                         (60, 60, 70), -1, cv2.LINE_AA)
-            
-            # Progress bar with gradient
-            progress_w = int(bar_w * fps_progress)
-            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + progress_w, bar_y + bar_h),
-                         fps_color, -1, cv2.LINE_AA)
-            
-            # Current gesture
-            cv2.putText(frame, "GESTURE", (40, 105), cv2.FONT_HERSHEY_SIMPLEX,
-                       0.5, self.ui.TEXT_SECONDARY, 1, cv2.LINE_AA)
-            
-            gesture_text = gesture['name']
-            cv2.putText(frame, gesture_text, (40, 135), cv2.FONT_HERSHEY_SIMPLEX,
-                       0.7, self.ui.TEXT_PRIMARY, 2, cv2.LINE_AA)
-            
-            # Finger count indicator with labels
-            finger_count = gesture['finger_count']
-            finger_names = ['👍', '☝️', '🖕', '💍', '🤙']
-            dot_y = 160
-            for i in range(5):
-                is_extended = i < finger_count
-                color = self.ui.ACCENT_PRIMARY if is_extended else (60, 60, 70)
-                self.ui.draw_smooth_circle(frame, (50 + i*40, dot_y), 6, color, -1)
-                
-                # Show which fingers are detected
-                if i in gesture.get('extended_fingers', []):
-                    cv2.putText(frame, finger_names[i], (42 + i*40, dot_y + 20),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, self.ui.SUCCESS_COLOR, 1, cv2.LINE_AA)
-            
-            # 3D Animation mode (if enabled)
-            if self.animation_3d and self.show_3d:
-                mode_text = f"Mode: {self.animation_3d.mode}"
-                obj_text = self.animation_3d.get_current_object_name()
-                cv2.putText(frame, mode_text, (40, 195), cv2.FONT_HERSHEY_SIMPLEX,
-                           0.5, self.ui.TEXT_SECONDARY, 1, cv2.LINE_AA)
-                cv2.putText(frame, obj_text, (40, 215), cv2.FONT_HERSHEY_SIMPLEX,
-                           0.6, self.ui.ACCENT_SECONDARY, 1, cv2.LINE_AA)
+        # Main Panel
+        panel_w, panel_h = 280, 160
+        self.ui.draw_glassmorphism_panel(frame, 20, 20, panel_w, panel_h, 0.25)
+        
+        # FPS
+        fps_color = self.ui.SUCCESS_COLOR if self.fps >= 50 else self.ui.ACCENT_SECONDARY
+        self.ui.draw_gradient_text(frame, f"FPS: {self.fps}", 40, 55, 0.8, 2)
+        
+        # FPS Bar
+        fps_progress = min(1.0, self.fps / 60.0)
+        cv2.rectangle(frame, (40, 70), (280, 76), (60, 60, 70), -1)
+        cv2.rectangle(frame, (40, 70), (40 + int(240 * fps_progress), 76), fps_color, -1)
+        
+        # Gesture Info
+        cv2.putText(frame, "GESTURE", (40, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.ui.TEXT_SECONDARY, 1, cv2.LINE_AA)
+        cv2.putText(frame, gesture['name'], (40, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.ui.TEXT_PRIMARY, 2, cv2.LINE_AA)
+        
+        # Finger dots
+        finger_count = gesture['finger_count']
+        dot_y = 160
+        for i in range(5):
+            is_extended = i < finger_count
+            color = self.ui.ACCENT_PRIMARY if is_extended else (60, 60, 70)
+            self.ui.draw_smooth_circle(frame, (50 + i*40, dot_y), 6, color, -1)
+
+        # 3D Info
+        if self.animation_3d and self.show_3d:
+            mode_text = f"Mode: {self.animation_3d.mode}"
+            obj_text = self.animation_3d.get_current_object_name()
+            cv2.putText(frame, mode_text, (40, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.ui.TEXT_SECONDARY, 1, cv2.LINE_AA)
+            cv2.putText(frame, obj_text, (40, 215), cv2.FONT_HERSHEY_SIMPLEX, 0.6, self.ui.ACCENT_SECONDARY, 1, cv2.LINE_AA)
+
+        # AI Translation Display
+        if self.current_translation:
+             self.ui.draw_glassmorphism_panel(frame, 20, height - 100, width - 40, 80, 0.3)
+             self.ui.draw_korean_text(frame, self.current_translation, 40, height - 50, self.ui.SUCCESS_COLOR)
+
+        if self.is_translating:
+             cv2.putText(frame, "Translating...", (width-200, height-95), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 255, 100), 1, cv2.LINE_AA)
         
         # Gesture guide panel (right side)
         if self.show_guide:
@@ -303,7 +312,7 @@ class HandGestureApp:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, self.ui.TEXT_SECONDARY, 1, cv2.LINE_AA)
         
         # Bottom control hints
-        controls = "ESC: Quit  |  H: Info  |  L: Landmarks  |  G: Guide  |  SPACE: Switch 3D"
+        controls = "ESC: Quit | TAB: Camera | SPACE: Object | H: Info | L: Landmarks"
         text_size = cv2.getTextSize(controls, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
         text_x = (width - text_size[0]) // 2
         
@@ -312,335 +321,202 @@ class HandGestureApp:
                                         text_size[0] + 20, 35, 0.2)
         cv2.putText(frame, controls, (text_x, height - 25),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.ui.TEXT_SECONDARY, 1, cv2.LINE_AA)
-    
-    def draw_hand_visualization(self, frame, hand_landmarks, width, height, label='Left'):
-        """Draw premium hand visualization with velocity arrow"""
-        
-        # Color Coding:
-        # Left Hand (Rotate) -> Green/Cyan Theme
-        # Right Hand (Scale) -> Orange/Blue Theme
-        if label == 'Left':
-            main_color = (100, 255, 100) # Green
-            conn_color = (100, 255, 200)
-        else:
-            main_color = (100, 200, 255) # Orange/Yellowish
-            conn_color = (100, 150, 255)
-            
-        if self.show_landmarks:
-            # Custom landmark drawing with premium colors
-            landmark_style = self.mp_drawing.DrawingSpec(
-                color=main_color, 
-                thickness=2,
-                circle_radius=3
-            )
-            
-            connection_style = self.mp_drawing.DrawingSpec(
-                color=conn_color, 
-                thickness=2
-            )
-            
-            self.mp_drawing.draw_landmarks(
-                frame,
-                hand_landmarks,
-                self.mp_hands.HAND_CONNECTIONS,
-                landmark_style,
-                connection_style
-            )
-        
-        # Draw Velocity Vector (Arrow)
-        # Showing the user how "fast" they are swiping
-        if hasattr(self, 'hand_velocity'):
-            speed = np.linalg.norm(self.hand_velocity)
-            if speed > 2.0: # Only draw if moving
-                # Get palm center
-                wrist = hand_landmarks.landmark[0]
-                middle = hand_landmarks.landmark[9]
-                cx = int((wrist.x + middle.x) / 2 * width)
-                cy = int((wrist.y + middle.y) / 2 * height)
-                
-                # Scale velocity for visualization
-                end_x = int(cx + self.hand_velocity[0] * 3)
-                end_y = int(cy + self.hand_velocity[1] * 3)
-                
-                # Color changes based on speed (Cyan -> Red)
-                color_intensity = min(255, int(speed * 10))
-                arrow_color = (100, 255 - color_intensity, 255)
-                
-                cv2.arrowedLine(frame, (cx, cy), (end_x, end_y), arrow_color, 4, tipLength=0.3)
-                
-    def draw_center_marker(self, frame):
-        """Draw subtle center marker for positioning guide"""
-        h, w = frame.shape[:2]
-        cx, cy = w // 2, h // 2
-        
-        # Subtle crosshair
-        size = 20
-        color = (60, 60, 70)
-        cv2.line(frame, (cx - size, cy), (cx + size, cy), color, 1)
-        cv2.line(frame, (cx, cy - size), (cx, cy + size), color, 1)
-        
-        # "Best Position" text
-        if self.show_guide:
-            cv2.putText(frame, "Center Hand Here", (cx - 60, cy + 40), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1, cv2.LINE_AA)
-    
+
     def process_frame(self, frame):
-        """Process frame with premium UI and 3D animations"""
-        # Apply subtle vignette effect
+        """Process frame (Gestures + UI) - Returns 2D frame"""
         height, width = frame.shape[:2]
+        frame = cv2.flip(frame, 1) # Mirror
         
-        # Flip for mirror effect
-        frame = cv2.flip(frame, 1)
-        
-        # Convert to RGB for MediaPipe
+        # MediaPipe Processing
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.hands.process(rgb_frame)
         
-        # Default gesture
-        gesture = {
-            'type': 'none',
-            'name': 'No Hand',
-            'finger_count': 0,
-            'extended_fingers': [],
-            'changed': False
-        }
+        gesture = {'type': 'none', 'name': 'No Hand', 'finger_count': 0}
         
-        # Draw persistent center marker
-        self.draw_center_marker(frame)
-        
-        # Store frame for HUD drawing
-        self.current_frame = frame
-        
-        # Process hand landmarks
         if results.multi_hand_landmarks:
-            # Need to zip landmarks with classification
             for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
-                # Get label (Left/Right)
-                # MediaPipe treats 'Left' as the person's left hand (which appears on the right if not flipped, 
-                # but we flipped the frame). 
-                # After cv2.flip(frame, 1):
-                # - Physical Right Hand -> Appears on Right Side -> Labeled as "Right"
-                # - Physical Left Hand -> Appears on Left Side -> Labeled as "Left"
                 label = handedness.classification[0].label
                 
-                # Draw hand visualization (Pass label for color coding)
-                self.draw_hand_visualization(frame, hand_landmarks, width, height, label)
+                # Draw Landmarks (2D Overlay)
+                if self.show_landmarks:
+                    self.mp_drawing.draw_landmarks(frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
                 
-                # Detect gesture
-                landmarks = hand_landmarks.landmark
-                gesture = self.gesture_detector.detect_gesture(landmarks)
+                # Detect Gesture & Update 3D Logic
+                gesture = self.gesture_detector.detect_gesture(hand_landmarks.landmark)
                 
-                # Get hand positions for 3D control
-                fingertip_positions = self.gesture_detector.get_fingertip_positions(
-                    landmarks, width, height
-                )
-                palm_center = self.gesture_detector.get_palm_center(
-                    landmarks, width, height
-                )
+                # Hand Stats
+                palm_center = self.gesture_detector.get_palm_center(hand_landmarks.landmark, width, height)
+                fingertip_positions = self.gesture_detector.get_fingertip_positions(hand_landmarks.landmark, width, height)
                 
-                # Handle 3D animation and particles based on gesture AND handedness
+                # AI Prediction Buffer
+                predicted = self.gesture_detector.predict_gesture(hand_landmarks.landmark)
+                if predicted and predicted != "?":
+                    current_time = time.time()
+                    if current_time - self.last_buffer_update > 2.0:
+                        if not self.gesture_buffer or self.gesture_buffer[-1] != predicted:
+                            self.gesture_buffer.append(predicted)
+                            self.last_buffer_update = current_time
+                
+                # --- 3D Interaction Logic ---
                 if self.animation_3d and self.show_3d:
-                    self.handle_gesture_effects(gesture, landmarks, fingertip_positions, palm_center, label)
+                    self.handle_interaction(gesture, hand_landmarks.landmark, palm_center, fingertip_positions, label)
         
-        # Update 3D animation
-        if self.animation_3d and self.show_3d:
-            current_time = time.time()
-            delta_time = current_time - self.prev_time
-            self.prev_time = current_time
+        # Update Physics
+        if self.animation_3d:
+            self.animation_3d.update(0.016) # Assume 60fps for physics step
+
+        # Draw UI Overlay (2D)
+        if self.show_info:
+            self.draw_info_panel(frame, gesture)
             
-            self.animation_3d.update(delta_time)
-            
-        # ALWAYS draw 3D object
-        if self.animation_3d and self.show_3d:
-            self.animation_3d.draw(frame)
-        
-        # Draw UI overlays
-        self.draw_info_panel(frame, gesture)
-        
-        # Update FPS
         self.update_fps()
-        
         return frame
-    
-    print("DEBUG: handle_gesture_effects called")
-    def handle_gesture_effects(self, gesture, landmarks, fingertip_positions, palm_center, handedness_label):
-        """
-        Handle gesture-based effects with STRICT DUAL HAND roles:
-        - LEFT Hand: Rotation Control ONLY (Grab to Rotate)
-        - RIGHT Hand: Scale Control ONLY (Pinch to Scale)
-        """
-        gesture_type = gesture['type']
+
+    def handle_interaction(self, gesture, landmarks, palm_center, fingertips, label):
+        """Handle gesture interaction for 3D object"""
+        # Calculate pinch for interactions
+        pinch_dist = self.gesture_detector.get_pinch_distance(landmarks, 1280, 720)
         
-        # Get hand orientation
+        # Calculate rotation from hand orientation
         pitch, yaw, roll = self.gesture_detector.get_hand_orientation(landmarks)
         hand_rotation = np.array([pitch, yaw, roll])
-        
-        # Check Pinch Distance (Thumb to Index)
-        pinch_dist = self.gesture_detector.get_pinch_distance(landmarks, self.animation_3d.width, self.animation_3d.height)
-        
-        # --- LEFT HAND: ROTATION CONTROL ---
-        if handedness_label == 'Left':
-            
-            # Draw Mode Indicator
-            self.ui.draw_hand_hud(self.current_frame, palm_center, "ROTATION", (100, 255, 100))
-            
-            # GRAB LOGIC (PINCH) -> ONLY FOR ROTATION
+
+        # LEFT HAND: Rotate
+        if label == 'Left':
             is_pinching = pinch_dist is not None and pinch_dist < 0.05
             
             if is_pinching:
-                # -- STATE: GRABBING (ROTATION LOCKED) --
                 if not self.animation_3d.is_grabbed:
                     self.animation_3d.is_grabbed = True
                     self.animation_3d.set_mode('GRAB')
-                    
-                    # Lock Offset
                     self.animation_3d.grab_start_hand_rotation = hand_rotation.copy()
                     self.animation_3d.grab_start_object_rotation = self.animation_3d.current_rotation.copy()
-                    print("🔒 LEFT HAND GRAB - Locked Rotation")
+                    self.animation_3d.rotation_history = []  # Reset history on new grab
                 
-                # Draw Lock UI
-                self.ui.draw_hand_hud(self.current_frame, palm_center, "LOCKED", (100, 255, 100))
+                # Update Rotation
+                rot_delta = hand_rotation - self.animation_3d.grab_start_hand_rotation
+                new_rotation = self.animation_3d.grab_start_object_rotation + rot_delta * 1.5
                 
-                # Update Object Rotation based on Hand Rotation + Offset
-                # New Object Rot = Start Object Rot + (Current Hand Rot - Start Hand Rot)
-                rotation_delta = hand_rotation - self.animation_3d.grab_start_hand_rotation
+                # Track rotation change for momentum
+                rotation_change = new_rotation - self.animation_3d.current_rotation
+                self.animation_3d.rotation_history.append(rotation_change)
                 
-                # Sensitivity 1.2 for slightly amplified feel but consistent
-                sensitivity = 1.2
-                target_rot = self.animation_3d.grab_start_object_rotation + rotation_delta * sensitivity
+                # Keep only last 5 frames
+                if len(self.animation_3d.rotation_history) > 5:
+                    self.animation_3d.rotation_history.pop(0)
                 
-                # Apply Smoothing to remove jitter (Make it feel 'heavy' yet responsive)
-                # alpha = 0.2 means tight control but filters high-frequency noise
-                alpha = 0.2
-                diff = target_rot - self.animation_3d.current_rotation
-                self.animation_3d.current_rotation += diff * alpha
-                self.animation_3d.target_rotation = self.animation_3d.current_rotation.copy()
-                
-                # Kill velocity
-                self.animation_3d.angular_velocity *= 0.0
-                
+                self.animation_3d.target_rotation = new_rotation
+                self.animation_3d.current_rotation += (self.animation_3d.target_rotation - self.animation_3d.current_rotation) * 0.2
             else:
-                # -- STATE: RELEASED --
+                # Just released?
                 if self.animation_3d.is_grabbed:
+                    # Calculate momentum from recent rotation changes
+                    if len(self.animation_3d.rotation_history) > 0:
+                        avg_change = np.mean(self.animation_3d.rotation_history, axis=0)
+                        # Apply momentum (boost it for better feel)
+                        self.animation_3d.angular_velocity = avg_change * 3.0
+                    
                     self.animation_3d.is_grabbed = False
                     self.animation_3d.set_mode('INERTIA')
-                    print("🔓 LEFT HAND RELEASED - Spin")
-                    
-                    # Calculate Throw Velocity
-                    current_pos = np.array([palm_center[0], palm_center[1]])
-                    if self.prev_palm_center is not None:
-                        # Simple velocity
-                        velocity = current_pos - self.prev_palm_center
-                        spin_power = 0.5
-                        # Invert Y for natural feel
-                        rot_velocity = [-velocity[1] * spin_power, velocity[0] * spin_power, 0]
-                        self.animation_3d.apply_impulse(rot_velocity)
                 
-                # Update velocity for next frame (always track for throw)
-                current_pos = np.array([palm_center[0], palm_center[1]])
-                self.prev_palm_center = current_pos
-
-                # Fist Gesture for Stop (Only Left Hand stops rotation)
-                if gesture_type == 'fist':
+                # Fist gesture freezes
+                if gesture['type'] == 'fist':
                      self.animation_3d.set_mode('FREEZE')
-                     self.ui.draw_hand_hud(self.current_frame, palm_center, "STOP", (255, 50, 50))
 
-        # --- RIGHT HAND: SCALE CONTROL ---
-        elif handedness_label == 'Right':
-            
-            # Draw Mode Indicator
-            self.ui.draw_hand_hud(self.current_frame, palm_center, "SCALE", (100, 200, 255))
-            
-            # Pinch Logic -> ONLY FOR SCALE
+        # RIGHT HAND: Scale
+        elif label == 'Right':
             if pinch_dist is not None:
-                # Map distance to scale
-                # Normal range 0.03 (closed) to 0.25 (open)
-                target_scale = np.interp(pinch_dist, [0.03, 0.25], [80, 400])
-                current_scale = self.animation_3d.objects[self.animation_3d.current_object_idx].scale
-                
-                # Apply smooth scaling
-                new_scale = current_scale * 0.9 + target_scale * 0.1
-                self.animation_3d.objects[self.animation_3d.current_object_idx].scale = new_scale
-            
-            # Right Hand Gestures
-            if gesture_type == 'pointing':
-                self.animation_3d.set_mode('FOLLOW')
-                if len(fingertip_positions) > 1:
-                    self.animation_3d.update_follow(fingertip_positions[1])
-            
-            elif gesture_type == 'peace':
-                self.animation_3d.set_mode('ORBIT')
+                # Map pinch to scale (50 to 400)
+                target_scale = np.interp(pinch_dist, [0.03, 0.25], [50, 400])
+                current_obj = self.animation_3d.objects[self.animation_3d.current_object_idx]
+                current_obj.scale = current_obj.scale * 0.9 + target_scale * 0.1
 
-    
+
+
     def run(self):
-        """Main application loop"""
-        if not self.initialize_camera():
-            return
+        """Main Loop"""
+        if not self.initialize_camera(): return
+
+        print("🚀 Holographic AR Started")
         
-        print("🚀 Premium Hand Gesture App Started")
-        print("📹 Show your hand to the camera")
-        
-        # Create named window with specific properties
-        cv2.namedWindow('Premium Hand Gesture Recognition', cv2.WINDOW_NORMAL)
-        
+        running = True
         try:
-            while True:
+            while running:
+                # 1. Capture Frame
                 ret, frame = self.cap.read()
-                if not ret:
-                    print("❌ Failed to read frame")
-                    break
+                if not ret: break
                 
-                # Process frame
+                # 2. Process (Tracking + 2D UI)
+                # processed_frame has UI drawn on it
                 processed_frame = self.process_frame(frame)
                 
-                # Display
-                cv2.imshow('Premium Hand Gesture Recognition', processed_frame)
+                # 3. Create a separate UI overlay if needed, 
+                # but simplified: Pass processed_frame as background to OpenGL
+                # The 3D object will be drawn ON TOP of this background.
+                # However, our UI (text) is drawn on processed_frame. 
+                # So: Background -> Camera+2D UI. Foreground -> 3D Object.
+                # Ideally: Background -> Camera. Middle -> 3D Object. Top -> UI.
+                # For simplicity/performance now: Background = Camera+UI, then 3D on top.
+                # This might occlude UI if 3D is big. 
+                # FIX: Draw UI *after* separately?
+                # Let's do: Background = Camera. 3D Object. UI Overlay.
+                # RendererGL supports UI overlay texture.
                 
-                # NO DELAY - Max Speed
-                key = cv2.waitKey(1) & 0xFF
+                # Recalculate approach for best visuals:
+                # Step A: Clean Camera Frame -> Render as GL Background
+                # Step B: Render 3D Object in GL
+                # Step C: Create Transparent UI Layer (OpenCV) -> Render as GL Foreground
                 
-                if key == 27 or key == ord('q'):  # ESC or Q
-                    print("👋 Exiting...")
-                    break
-                elif key == ord('h'):
-                    self.show_info = not self.show_info
-                elif key == ord('l'):
-                    self.show_landmarks = not self.show_landmarks
-                elif key == ord('g'):
-                    self.show_guide = not self.show_guide
-                elif key == ord(' '):  # SPACE - switch 3D object
-                    if self.animation_3d:
-                        self.animation_3d.switch_object()
-                        print(f"🎨 Switched to: {self.animation_3d.get_current_object_name()}")
-                    
+                # Create clean UI layer
+                ui_layer = np.zeros((720, 1280, 4), dtype=np.uint8) 
+                # (Can't easily draw OpenCV on RGBA surface efficiently every frame without overhead)
+                # STICK TO: Background (Camera) -> 3D -> UI (drawn on top of camera frame) ?
+                # If we draw UI on camera frame, then 3D object covers UI.
+                # If we want UI on top, we need to pass it separately.
+                
+                # FAST PATH: 
+                # 1. Get Camera Frame.
+                # 2. Draw 2D UI on it (in-place). 
+                # 3. Render this as background.
+                # 4. Render 3D Object (Hologram).
+                # Result: Hologram is ON TOP of UI. This is actually "Cinematic" (UI is on screen, Hologram is projected in space).
+                # If UI gets blocked, we can adjust.
+                
+                # Get State for Renderer
+                rot_angles = self.animation_3d.current_rotation
+                scale = self.animation_3d.objects[self.animation_3d.current_object_idx].scale
+                shape = self.animation_3d.get_current_object_name()
+                
+                # Render Scene (Returns Pygame Keys)
+                keys = self.renderer.render_scene(processed_frame, rot_angles, scale, shape_type=shape)
+                self.renderer.flip()
+                
+                # Handle Inputs
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        running = False
+                    elif event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_ESCAPE or event.key == pygame.K_q:
+                            running = False
+                        elif event.key == pygame.K_h:
+                            self.show_info = not self.show_info
+                        elif event.key == pygame.K_l:
+                            self.show_landmarks = not self.show_landmarks
+                        elif event.key == pygame.K_g:
+                            self.show_guide = not self.show_guide
+                        elif event.key == pygame.K_SPACE:
+                            self.animation_3d.switch_object()
+                        elif event.key == pygame.K_TAB: # Switch Camera
+                            self.switch_camera()
+                        elif event.key == pygame.K_t: # Translate
+                             if self.gesture_buffer:
+                                 self.current_translation = self.translator.translate(self.gesture_buffer)
+                                 self.gesture_buffer = []
+
         finally:
-            self.cleanup()
-    
-    def cleanup(self):
-        """Clean up resources"""
-        if self.cap:
+            self.renderer.quit()
             self.cap.release()
-        cv2.destroyAllWindows()
-        self.hands.close()
-        print("✅ Cleanup complete")
-
-
-def main():
-    """Entry point"""
-    print("=" * 60)
-    print("✨ Premium Hand Gesture Recognition UI ✨")
-    print("=" * 60)
-    
-    try:
-        app = HandGestureApp()
-        app.run()
-    except KeyboardInterrupt:
-        print("\n⚠️  Interrupted by user")
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-
+            self.hands.close()
 
 if __name__ == "__main__":
-    main()
+    HandGestureApp().run()
